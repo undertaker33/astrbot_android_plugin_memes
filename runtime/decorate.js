@@ -7,7 +7,7 @@ import {
   extractText,
   sendCommandResult,
 } from "./host_api.js";
-import { matchCategory } from "./match.js";
+import { cleanupExplicitLabels, matchCategory } from "./match.js";
 import { pickMeme } from "./meme_index.js";
 
 function suffixText(text, category) {
@@ -23,14 +23,6 @@ function applyAppendMode(resultController, attachment, text, config, logger, cat
       category,
     });
     return false;
-  }
-
-  if (
-    typeof replacementText === "string" &&
-    replacementText !== text &&
-    typeof resultController.replaceText === "function"
-  ) {
-    resultController.replaceText(replacementText);
   }
 
   if (typeof resultController.appendAttachment === "function") {
@@ -54,6 +46,36 @@ function applyAppendMode(resultController, attachment, text, config, logger, cat
   }
 
   return true;
+}
+
+function applyReplacementText(resultController, originalText, replacementText, logger, metadata) {
+  if (
+    !resultController ||
+    typeof resultController.replaceText !== "function" ||
+    typeof replacementText !== "string" ||
+    replacementText === originalText
+  ) {
+    return false;
+  }
+
+  resultController.replaceText(replacementText);
+  logger.info("Cleaned explicit meme tag from response text", metadata || {});
+  return true;
+}
+
+function cleanupExplicitTagWithoutPending(resultController, originalText, logger) {
+  if (!originalText) {
+    return false;
+  }
+
+  const cleanedText = cleanupExplicitLabels(originalText);
+  return applyReplacementText(
+    resultController,
+    originalText,
+    cleanedText,
+    logger,
+    { source: "cleanup_without_pending" },
+  );
 }
 
 function buildTagPrompt(state) {
@@ -308,6 +330,7 @@ export function decorateResult(state, logger, ...args) {
   const requestId = extractRequestId(args);
   const originalText = extractText(args);
   const conversationId = extractConversationId(args);
+  const resultController = extractResultController(args, logger);
 
   let pending = requestId ? state.pendingByRequestId[requestId] : null;
 
@@ -331,12 +354,25 @@ export function decorateResult(state, logger, ...args) {
   }
 
   if (!pending) {
+    cleanupExplicitTagWithoutPending(resultController, originalText, logger);
     return;
   }
 
-  const resultController = extractResultController(args, logger);
   const attachment = buildAssetAttachment(pending.file, pending.category);
   const replacementText = replacementTextForPending(pending, originalText);
+  applyReplacementText(
+    resultController,
+    originalText,
+    replacementText,
+    logger,
+    {
+      requestId: requestId || "(empty)",
+      conversationId,
+      category: pending.category,
+      sendMode: state.config.sendMode,
+      source: pending.source,
+    },
+  );
 
   if (state.config.sendMode === "append") {
     const appended = applyAppendMode(
